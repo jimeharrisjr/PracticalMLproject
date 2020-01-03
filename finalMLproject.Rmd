@@ -1,0 +1,130 @@
+---
+title: "Prediction Assignment Writeup"
+author: "James Harris"
+date: "1/1/2020"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Summary
+
+In this project, I examined the data from the Weight Lifting Exercises Dataset (http://groupware.les.inf.puc-rio.br/har#weight_lifting_exercises ) which includes a training set (labeled) and a test set (unlabeled). After dividing the training set into a test and validation set, I tried a number of different models, but two in particular had very good results (though both were extremely computationally and memory intensive): Random Forest and xgbTree (Extreme Gradient Boost Tree).
+
+The Experiments below were run in R version 3.6.1 with Caret version 6.0-84, data.table version 1.12.8, doParallel version 1.0.15, dplyr version 0.8.3, e1071 version 1.7-3, foreach version 1.4.7, xgboost version 0.90.0.2, and randomForest version 4.6-14 on a 2019 16" MacBook Pro with an Intel i9 8-core, dual-threaded (16 virtual cores) processor and 64GB of RAM.
+
+## Exploratory Data Analysis
+
+As seen below, the structure of the data set is complicated, but upon closer inspection, there are two major components to the training set: a summary set with statistical summaries across time windows (with variable new_window set equal to "yes"), and raw measurements (new_window set to "no").
+
+
+```{r}
+library(caret)
+library(data.table)
+set.seed(123456)
+training<-fread('pml-training.csv')
+head(training,1)
+```
+
+
+
+```{r}
+testing<-fread('pml-testing.csv')
+
+```
+Examining the testing set reveals that there are only raw data elements (i.e., no summary data sets with new_window equal to "yes"), so the summary sets are not useful for training. Once removed, they reveal a large number of columns with "NA" which can obviously be removed for training
+
+Similarly, the first seven columns in both data sets deal with information about the measurement (metadata) - user name, time stamp, etc. - and therefore are not useful for training a model.
+
+The final column of the training set - classe - needs to be a factor variable to work well with our caret models, so that change to the data must be made, as well.
+
+## Cross Validation
+
+As there is only one training set, and the test set offered is not labeled, I used the createDataPartition function in caret to further randomly divide the training set into a training and validation set. This enabled me to test the accuracy of the models against one another. There are a large number of samples in the training set (more than 19,000), so I decided to use 30% for validation and 70% for training, giving me a sufficient number of samples of each class in training and validation. Then the non-useful data was also trimmed away:
+```{r}
+training<-training[new_window=='no'] # remove summary blocks
+training<-training[,.SD[,8:ncol(training)]] # remove metadata columns
+# remove the remaining "all NA" columns
+training<-training[ , ! apply( training , 2 , function(x) all(is.na(x)) ), with=FALSE ]
+# convert the "classe" column to a factor
+training[,classe:=as.factor(classe)]
+
+# use Caret to create a training and validation set from the training data
+inTrain<-createDataPartition(training$classe, p=.7, list=FALSE)
+validation<-training[-inTrain]
+training<-training[inTrain]
+```
+
+This left me with a set of training and validation data to compare models against identical data.
+
+## Preprocessing
+
+The numerical ranges of the variables are vastly different, so I elected to use preProcess from the caret package to center and scale the data (subtract the mean of each variable and divide by the standard deviation). This preproc object is used later on the validation and test data.
+```{r}
+preproc<-preProcess(training, method = c('center','scale'))
+trainPC<-predict(preproc, training)
+```
+
+## Training
+
+Although several models were attempted, the two most successful are shown:
+
+```{r, cache=TRUE}
+#use parallel processing to speed the calculations
+library(doParallel)
+cl<-makePSOCKcluster(14)
+registerDoParallel(cl)
+# Fit a Random Forest model
+modelFit<-train(classe ~ ., data=trainPC, method='rf')
+stopCluster(cl)
+```
+
+The accuracy of this model is measured with our validation data and shown with ConfusionMatrix:
+```{r}
+# use the preprocess object created above to center and scale the validation data
+testPC<-predict(preproc,validation)
+confusionMatrix(as.factor(validation$classe), predict(modelFit,testPC))
+```
+
+The Random Forest model performed extremely well, with an overall accuracy of about 99%.
+
+One other model performed quite well (*WARNING*: this took > 20 minutes of 14 virtual cores at ~100% utilization, so not recommended for slower systems):
+```{r, cache=TRUE}
+library(doParallel)
+cl<-makePSOCKcluster(14)
+registerDoParallel(cl)
+# Fit a Random Forest model
+modelFit2<-train(classe ~ ., data=trainPC, method='xgbTree')
+stopCluster(cl)
+```
+
+The XGBtree model, as can be seen below, was very nearly flawless, with an overall accuracy of over 99% - but at the expense of considerably more computational resources.
+```{r}
+confusionMatrix(as.factor(validation$classe), predict(modelFit2,testPC))
+```
+
+## The Test Set
+
+I have no labels for the final test set, but running both models across the test data (prepared the same way) is instructive:
+
+```{r}
+testing<-testing[ , ! apply( testing , 2 , function(x) all(is.na(x)) ), with=FALSE ]
+testnames<-testing[,1:2] # save for later
+testing<-testing[,.SD[,8:ncol(testing)]]
+testF<-predict(preproc,testing)
+testF$classe<-as.factor(testF$classe)
+model1Predictions<-predict(modelFit,testF)
+model2Predictions<-predict(modelFit2,testF)
+# Create a confusion matrix of the resulting predictions from each model
+confusionMatrix(model1Predictions, model2Predictions)
+```
+
+## Conclusion
+
+Both models predict the exact same classes for the test data, and both perfomed exceptionally well on the validation data. I therefore predit the final data classes to be: 
+```{r}
+print(cbind(testnames,model2Predictions))
+```
+
